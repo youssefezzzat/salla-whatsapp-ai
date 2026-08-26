@@ -38,7 +38,7 @@ export default async function handler(req, res) {
 
         const systemInstructionText = `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. 
 - تحدث بلغة عربية (عامية مصرية بسيطة وودودة ومحترفة).
-- مساعدة العميل في اختيار المنتجات وشرح المميزات والأسعار، وإذا أرسل إشعار بطلب جديد، رحب به وشكره على ثقته في المتجر.
+- ساعد العميل في اختيار المنتجات وشرح المميزات والأسعار، وإذا أرسل إشعار بطلب جديد، رحب به وشكره على ثقته في المتجر.
 - كن دقيقاً، صبوراً، وساعد العميل حتى إتمام الشراء.`;
 
         const aiResponse = await fetch(aiUrl, {
@@ -51,10 +51,16 @@ export default async function handler(req, res) {
         });
 
         const aiData = await aiResponse.json();
+        
+        // طباعة الـ Response في الـ Logs للتأكد مما يرسله جوجل
+        console.log("Gemini Raw Response:", JSON.stringify(aiData));
+
         let replyText = "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
         
-        if (aiData && aiData.candidates && aiData.candidates[0]?.content?.parts?.[0]?.text) {
+        if (aiData?.candidates?.[0]?.content?.parts?.[0]?.text) {
             replyText = aiData.candidates[0].content.parts[0].text;
+        } else if (aiData?.error) {
+            replyText = `خطأ من جوجل: ${aiData.error.message || 'unknown'}`;
         }
 
         const totalTime = Date.now() - t0;
