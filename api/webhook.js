@@ -21,12 +21,13 @@ export default async function handler(req, res) {
 
         const userPhone = payload.phone;
         const userMessage = payload.message;
+        const customerName = payload.name || 'عميل جديد';
 
-        if (!userMessage) {
-            return res.status(200).json({ status: 'skipped_empty_message' });
+        if (!userMessage || !userPhone) {
+            return res.status(200).json({ status: 'skipped_missing_data' });
         }
 
-        // 1. فحص الـ Idempotency بسرعة
+        // 1. فحص الـ Idempotency بسرعة فائقة
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
             .select('webhook_id')
@@ -37,10 +38,32 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
 
-        // 2. استدعاء جيميناي بالموديل الصحيح والمطلوب رسمياً (gemini-3.6-flash)
+        // 2. سحب آخر رسايل للمحادثة (History) عشان جيميناي يكون فاهم السياق
+        const { data: historyData } = await supabase
+            .from('messages')
+            .select('role, content')
+            .eq('phone', userPhone)
+            .order('created_at', { ascending: true })
+            .limit(6);
+
+        let contents = [];
+        if (historyData && historyData.length > 0) {
+            contents = historyData.map(msg => ({
+                role: msg.role === 'model' ? 'model' : 'user',
+                parts: [{ text: String(msg.content || '') }]
+            }));
+        }
+        
+        // إضافة الرسالة الحالية للـ Contents
+        contents.push({
+            role: 'user',
+            parts: [{ text: String(userMessage) }]
+        });
+
+        // 3. استدعاء جيميناي بالموديل المطلوب وبسياق المحادثة الكامل
         const response = await ai.models.generateContent({
             model: 'gemini-3.6-flash',
-            contents: [{ role: 'user', parts: [{ text: String(userMessage) }] }],
+            contents: contents,
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. 
                 - تحدث بلغة عربية (عامية مصرية بسيطة وودودة ومحترفة).
@@ -60,7 +83,7 @@ export default async function handler(req, res) {
 
         const totalTime = Date.now() - t0;
 
-        // 3. إرسال الرد فوراً للعميل بأعلى سرعة (سرعة صاروخية)
+        // 4. إرسال الرد فوراً للعميل
         res.status(200).json({ 
             status: 'success', 
             webhook_id: webhookId, 
@@ -68,11 +91,26 @@ export default async function handler(req, res) {
             reply: replyText 
         });
 
-        // 4. العمليات وسجلات قاعدة البيانات في الخلفية بهدوء ت تام
+        // 5. العمليات وقاعدة البيانات في الخلفية (Background Tasks) لضمان عدم حدوث أي تأخير
         (async () => {
             try {
+                // تسجيل الـ Idempotency
                 await supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]);
 
+                // التأكد من وجود العميل وجلسته أو إنشائهم
+                await supabase.from('customers').upsert([{ phone: userPhone, name: customerName }], { onConflict: 'phone' });
+                
+                const { data: session } = await supabase
+                    .from('conversations_sessions')
+                    .select('phone')
+                    .eq('phone', userPhone)
+                    .single();
+
+                if (!session) {
+                    await supabase.from('conversations_sessions').insert([{ phone: userPhone, mode: 'ai', department: 'sales' }]);
+                }
+
+                // حفظ الرسايل في جدول الـ messages
                 await supabase.from('messages').insert([
                     { phone: userPhone, role: 'user', content: userMessage },
                     { phone: userPhone, role: 'model', content: replyText }
