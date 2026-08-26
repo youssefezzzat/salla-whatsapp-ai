@@ -1,39 +1,24 @@
-import express from 'express';
-import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI } from '@google/genai';
 
-dotenv.config();
-
-const app = express();
-app.use(express.json());
-
-// الاتصال بـ Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-
-// تهيئة Gemini بالموديل المحدث والسليم
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-const PORT = process.env.PORT || 3000;
+export default async function handler(req, res) {
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method not allowed' });
+    }
 
-app.get('/', (req, res) => {
-    return res.send('🚀 Enterprise AI Sales & Support Server is running!');
-});
-
-app.post('/api/webhook', async (req, res) => {
     try {
-        console.log("🔥 VERCEL FORCED RUN - MODEL: gemini-3.6-flash");
-        console.log("📥 Received webhook body:", req.body);
-
+        console.log("🔥 VERCEL CLEAN RUN - MODEL: gemini-3.6-flash");
         const webhookId = req.headers['webhook-id'] || req.headers['x-webhook-id'] || `wh_${Date.now()}`;
         const payload = req.body;
 
         if (payload.from_me) {
-            console.log("Skipping message sent by bot.");
             return res.status(200).json({ status: 'skipped_from_me' });
         }
 
-        // 1. فحص الـ Idempotency لمنع تكرار الويب هوك تماماً
+        // 1. Idempotency Check
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
             .select('webhook_id')
@@ -41,7 +26,6 @@ app.post('/api/webhook', async (req, res) => {
             .single();
 
         if (existingLog) {
-            console.log(`Duplicate webhook ignored: ${webhookId}`);
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
 
@@ -49,9 +33,8 @@ app.post('/api/webhook', async (req, res) => {
 
         const userPhone = payload.phone;
         const userMessage = payload.message;
-        console.log(`💬 User (${userPhone}) message: "${userMessage}"`);
 
-        // 2. التحقق من وجود العميل في جدول customers، وإضافته لو جديد
+        // 2. Customer Check
         let { data: customer } = await supabase
             .from('customers')
             .select('*')
@@ -62,7 +45,7 @@ app.post('/api/webhook', async (req, res) => {
             await supabase.from('customers').insert([{ phone: userPhone, name: payload.name || 'عميل جديد' }]);
         }
 
-        // 3. التحقق من حالة المحادثة
+        // 3. Session Check
         let { data: session } = await supabase
             .from('conversations_sessions')
             .select('*')
@@ -79,17 +62,16 @@ app.post('/api/webhook', async (req, res) => {
         }
 
         if (session && session.mode === 'human') {
-            console.log(`User ${userPhone} is handled by human agent. AI skipped.`);
             await supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]);
             return res.status(200).json({ status: 'human_mode_active', reply: null });
         }
 
-        // 4. حفظ رسالة المستخدم في جدول الـ messages
+        // 4. Save User Message
         await supabase.from('messages').insert([
             { phone: userPhone, role: 'user', content: userMessage }
         ]);
 
-        // 5. سحب آخر الرسائل للذاكرة وتنسيقها
+        // 5. Fetch History and Format cleanly
         const { data: historyData } = await supabase
             .from('messages')
             .select('role, content')
@@ -120,7 +102,7 @@ app.post('/api/webhook', async (req, res) => {
             });
         }
 
-        // 6. تشغيل الـ AI باستخدام الموديل الصح gemini-3.6-flash
+        // 6. Call Gemini API using gemini-3.6-flash
         const response = await ai.models.generateContent({
             model: 'gemini-3.6-flash',
             contents: contents,
@@ -143,9 +125,7 @@ app.post('/api/webhook', async (req, res) => {
                 .eq('phone', userPhone);
         }
 
-        console.log(`🤖 AI Reply: "${replyText}"`);
-
-        // 7. حفظ رد الـ AI في الداتا بيز
+        // 7. Save AI Response
         await supabase.from('messages').insert([
             { phone: userPhone, role: 'model', content: replyText }
         ]);
@@ -157,11 +137,7 @@ app.post('/api/webhook', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error processing Enterprise webhook:", error);
+        console.error("Error processing Vercel webhook:", error);
         return res.status(500).json({ error: error.message || error });
     }
-});
-
-app.listen(PORT, () => {
-    console.log(`🚀 Enterprise Server running on port ${PORT}`);
-});
+}
