@@ -1,8 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
-import { GoogleGenAI } from '@google/genai';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
@@ -19,9 +17,6 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_from_me' });
         }
 
-        const t1 = Date.now();
-        console.log(`⏱️ Setup time: ${t1 - t0}ms`);
-
         // فحص الـ Idempotency
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
@@ -32,9 +27,6 @@ export default async function handler(req, res) {
         if (existingLog) {
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
-
-        const t2 = Date.now();
-        console.log(`⏱️ Idempotency check time: ${t2 - t1}ms`);
 
         let userPhone, userMessage, customerName;
         const eventType = payload.event || 'chat_message';
@@ -63,9 +55,6 @@ export default async function handler(req, res) {
             supabase.from('messages').select('role, content').eq('phone', userPhone).order('created_at', { ascending: true }).limit(2)
         ]);
 
-        const t3 = Date.now();
-        console.log(`⏱️ Supabase queries time: ${t3 - t2}ms`);
-
         let session = sessionResult.data;
         if (!session) {
             const { data: newSession } = await supabase
@@ -80,6 +69,7 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'human_mode_active', reply: null });
         }
 
+        // تجهيز الـ Contents لـ Gemini API
         let contents = [];
         const historyData = historyResult.data;
         if (historyData && historyData.length > 0) {
@@ -94,21 +84,41 @@ export default async function handler(req, res) {
             parts: [{ text: String(userMessage) }]
         });
 
-        // استدعاء Gemini API
-        const aiStart = Date.now();
-        const response = await ai.models.generateContent({
-            model: 'gemini-3.6-flash',
-            contents: contents,
-            config: {
-                systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. تحدث بعامية مصرية بسيطة وودودة ومحترفة لمساعدة العميل.`,
-            }
+        // استدعاء Gemini مباشرة عبر REST API (أسرع بكتير وبدون مكتبات ثقيلة)
+        const geminiApiKey = process.env.GEMINI_API_KEY;
+        const modelName = 'gemini-1.5-flash'; // استخدام موديل مستقر وسريع جداً على الـ API
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`;
+
+        const systemInstructionText = `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني (يعمل على سلة). مهمتك:
+        - التحدث بلغة عربية (عامية مصرية بسيطة وودودة ومحترفة).
+        - مساعدة العميل في اختيار المنتجات وشرح المميزات والأسعار، وإذا أرسل إشعار بطلب جديد، رحب به وشكره على ثقته في المتجر وأكد له أن طلبه قيد المراجعة.
+        - إذا طلب العميل التحدث مع موظف بشري أو اشتكى بشدة، أجب بـ [HUMAN_HANDOFF] في أول ردك.
+        - كن دقيقاً، صبوراً، وساعد العميل حتى إتمام الشراء.`;
+
+        const geminiResponse = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                system_instruction: {
+                    parts: [{ text: systemInstructionText }]
+                },
+                contents: contents
+            })
         });
-        const aiEnd = Date.now();
-        console.log(`⏱️ Gemini API time: ${aiEnd - aiStart}ms`);
 
-        let replyText = response.text || "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
+        const geminiData = await geminiResponse.json();
 
-        // حفظ الرسائل في الخلفية بدون ما نعطل الرد
+        let replyText = "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
+        if (geminiData && geminiData.candidates && geminiData.candidates[0]?.content?.parts?.[0]?.text) {
+            replyText = geminiData.candidates[0].content.parts[0].text;
+        }
+
+        if (replyText.includes('[HUMAN_HANDOFF]')) {
+            replyText = "ولا تقلق يا فندم، أنا هحولك حالاً لأحد زميلي من خدمة العملاء يتابع معاك التفاصيل بدقة. ثواني ويكون معاك!";
+            supabase.from('conversations_sessions').update({ mode: 'human' }).eq('phone', userPhone).then();
+        }
+
+        // حفظ البيانات في الخلفية
         Promise.all([
             supabase.from('customers').insert([{ phone: userPhone, name: customerName }]),
             supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]),
@@ -117,7 +127,6 @@ export default async function handler(req, res) {
         ]).catch(err => console.error("Background sync error:", err));
 
         const totalTime = Date.now() - t0;
-        console.log(`⏱️ TOTAL Execution time: ${totalTime}ms`);
 
         return res.status(200).json({ 
             status: 'success', 
