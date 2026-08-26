@@ -1,11 +1,13 @@
 import { createClient } from '@supabase/supabase-js';
-import OpenAI from 'openai';
+import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// تهيئة Gemini بالـ SDK الحديث
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // 1. دالة بناء السياق (Context Injection)
 export async function buildAiContext(phone) {
@@ -27,7 +29,7 @@ export async function buildAiContext(phone) {
     };
 }
 
-// 2. دالة معالجة الرد عبر GPT-4o
+// 2. دالة معالجة الرد عبر Gemini
 export async function processMessageWithAI(phone, userInput) {
     const context = await buildAiContext(phone);
 
@@ -35,31 +37,31 @@ export async function processMessageWithAI(phone, userInput) {
     قواعد التشغيل:
     1. التزم بالسياق المرفق ولا تخمن أبدًا.
     2. إذا طلب العميل موظف بشري أو أبدى غضباً، صنف القسم إلى 'human_handoff'.
-    3. الردود قصيرة وواضحة تناسب واتساب.`;
+    3. الردود قصيرة وواضحة تناسب واتساب.
+    
+    يجب أن يكون الرد بصيغة JSON حصراً يحتوي على الخصائص التالية:
+    - department: "sales" أو "support" أو "human_handoff"
+    - reply_arabic: نص الرد للعميل
+    - action: "none" أو "request_template" أو "update_memory"`;
 
-    const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: `الرسالة: ${userInput}\nالسياق: ${JSON.stringify(context)}` }
-        ],
-        response_format: {
-            type: "json_schema",
-            json_schema: {
-                name: "classification_response",
-                schema: {
-                    type: "object",
-                    properties: {
-                        department: { type: "string", enum: ["sales", "support", "human_handoff"] },
-                        reply_arabic: { type: "string" },
-                        action: { type: "string", enum: ["none", "request_template", "update_memory"] }
-                    },
-                    required: ["department", "reply_arabic", "action"]
-                }
+    const promptText = `${systemPrompt}\n\nالسياق:\n${JSON.stringify(context)}\n\nرسالة العميل: ${userInput}`;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: promptText,
+            config: {
+                responseMimeType: "application/json"
             }
-        },
-        max_tokens: 512
-    });
+        });
 
-    return JSON.parse(response.choices[0].message.content);
+        return JSON.parse(response.text);
+    } catch (error) {
+        console.error("Gemini Error:", error);
+        return {
+            department: "support",
+            reply_arabic: "أهلاً بك، عذراً حدث خطأ تقني بسيط وسيتم تحويلك لموظف خدمة العملاء.",
+            action: "human_handoff"
+        };
+    }
 }
