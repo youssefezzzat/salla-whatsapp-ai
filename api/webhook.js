@@ -10,7 +10,6 @@ export default async function handler(req, res) {
     }
 
     try {
-        console.log("🔥 VERCEL CLEAN RUN - MODEL: gemini-3.6-flash");
         const webhookId = req.headers['webhook-id'] || req.headers['x-webhook-id'] || `wh_${Date.now()}`;
         const payload = req.body;
 
@@ -31,8 +30,31 @@ export default async function handler(req, res) {
 
         await supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]);
 
-        const userPhone = payload.phone;
-        const userMessage = payload.message;
+        // تحديد نوع الويب هوك (هل هو حدث من سلة زي order.created ولا رسالة دردشة؟)
+        let userPhone, userMessage, customerName;
+        const eventType = payload.event || 'chat_message';
+
+        if (eventType === 'order.created' && payload.data) {
+            // التعامل مع إشعار طلب سلة
+            userPhone = payload.data.customer?.mobile || 'unknown';
+            customerName = `${payload.data.customer?.first_name || ''} ${payload.data.customer?.last_name || ''}`.trim();
+            const orderId = payload.data.id;
+            const totalAmount = payload.data.amounts?.total?.amount || 0;
+            const currency = payload.data.amounts?.total?.currency || 'SAR';
+
+            userMessage = `مرحباً، لقد قمت للتو بإنشاء طلب جديد برقم #${orderId} بقيمة ${totalAmount} ${currency}.`;
+        } else {
+            // التعامل مع رسائل الدردشة العادية
+            userPhone = payload.phone || 'unknown';
+            customerName = payload.name || 'عميل جديد';
+            userMessage = payload.message || '';
+        }
+
+        if (!userMessage) {
+            return res.status(200).json({ status: 'skipped_empty_message' });
+        }
+
+        console.log(`💬 Processing [${eventType}] for (${userPhone}): "${userMessage}"`);
 
         // 2. Customer Check
         let { data: customer } = await supabase
@@ -42,7 +64,7 @@ export default async function handler(req, res) {
             .single();
 
         if (!customer) {
-            await supabase.from('customers').insert([{ phone: userPhone, name: payload.name || 'عميل جديد' }]);
+            await supabase.from('customers').insert([{ phone: userPhone, name: customerName }]);
         }
 
         // 3. Session Check
@@ -71,7 +93,7 @@ export default async function handler(req, res) {
             { phone: userPhone, role: 'user', content: userMessage }
         ]);
 
-        // 5. Fetch History and Format cleanly
+        // 5. Fetch History
         const { data: historyData } = await supabase
             .from('messages')
             .select('role, content')
@@ -102,14 +124,14 @@ export default async function handler(req, res) {
             });
         }
 
-        // 6. Call Gemini API using gemini-3.6-flash
+        // 6. Call Gemini API
         const response = await ai.models.generateContent({
             model: 'gemini-3.6-flash',
             contents: contents,
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني (يعمل على سلة). مهمتك:
                 - التحدث بلغة عربية (عامية مصرية بسيطة وودودة ومحترفة).
-                - مساعدة العميل في اختيار المنتجات وشرح المميزات والأسعار.
+                - مساعدة العميل في اختيار المنتجات وشرح المميزات والأسعار، وإذا أرسل إشعار بطلب جديد، رحب به وشكره على ثقته في المتجر وأكد له أن طلبه قيد المراجعة.
                 - إذا طلب العميل التحدث مع موظف بشري أو اشتكى بشدة، أجب بـ [HUMAN_HANDOFF] في أول ردك.
                 - كن دقيقاً، صبوراً، وساعد العميل حتى إتمام الشراء.`,
             }
@@ -133,6 +155,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ 
             status: 'success', 
             webhook_id: webhookId, 
+            event_handled: eventType,
             reply: replyText 
         });
 
