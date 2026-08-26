@@ -5,8 +5,6 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-
-// تهيئة Gemini بالـ SDK الحديث
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // 1. دالة بناء السياق (Context Injection)
@@ -29,7 +27,7 @@ export async function buildAiContext(phone) {
     };
 }
 
-// 2. دالة معالجة الرد عبر Gemini
+// 2. دالة معالجة الرد عبر Gemini بالصيغة الصحيحة
 export async function processMessageWithAI(phone, userInput) {
     const context = await buildAiContext(phone);
 
@@ -44,12 +42,17 @@ export async function processMessageWithAI(phone, userInput) {
     - reply_arabic: نص الرد للعميل
     - action: "none" أو "request_template" أو "update_memory"`;
 
-    const promptText = `${systemPrompt}\n\nالسياق:\n${JSON.stringify(context)}\n\nرسالة العميل: ${userInput}`;
-
     try {
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
-            contents: promptText,
+            contents: [
+                {
+                    role: 'user',
+                    parts: [
+                        { text: `${systemPrompt}\n\nالسياق:\n${JSON.stringify(context)}\n\nرسالة العميل: ${userInput}` }
+                    ]
+                }
+            ],
             config: {
                 responseMimeType: "application/json"
             }
