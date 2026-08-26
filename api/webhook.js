@@ -9,6 +9,8 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
+    const startTime = Date.now();
+
     try {
         const webhookId = req.headers['webhook-id'] || req.headers['x-webhook-id'] || `wh_${Date.now()}`;
         const payload = req.body;
@@ -17,7 +19,7 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_from_me' });
         }
 
-        // 1. Idempotency Check
+        // 1. Idempotency Check سريع
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
             .select('webhook_id')
@@ -28,14 +30,13 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
 
-        await supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]);
+        // تسجيل الـ webhook في الخلفية بدون انتظار تعطيلي كامل
+        supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]).then();
 
-        // تحديد نوع الويب هوك (هل هو حدث من سلة زي order.created ولا رسالة دردشة؟)
         let userPhone, userMessage, customerName;
         const eventType = payload.event || 'chat_message';
 
         if (eventType === 'order.created' && payload.data) {
-            // التعامل مع إشعار طلب سلة
             userPhone = payload.data.customer?.mobile || 'unknown';
             customerName = `${payload.data.customer?.first_name || ''} ${payload.data.customer?.last_name || ''}`.trim();
             const orderId = payload.data.id;
@@ -44,7 +45,6 @@ export default async function handler(req, res) {
 
             userMessage = `مرحباً، لقد قمت للتو بإنشاء طلب جديد برقم #${orderId} بقيمة ${totalAmount} ${currency}.`;
         } else {
-            // التعامل مع رسائل الدردشة العادية
             userPhone = payload.phone || 'unknown';
             customerName = payload.name || 'عميل جديد';
             userMessage = payload.message || '';
@@ -54,26 +54,19 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_empty_message' });
         }
 
-        console.log(`💬 Processing [${eventType}] for (${userPhone}): "${userMessage}"`);
+        // 2. سحب البيانات والـ History بشكل متزامن (Parallel) لتقليل وقت الانتظار
+        const [customerResult, sessionResult, historyResult] = await Promise.all([
+            supabase.from('customers').select('*').eq('phone', userPhone).single(),
+            supabase.from('conversations_sessions').select('*').eq('phone', userPhone).single(),
+            supabase.from('messages').select('role, content').eq('phone', userPhone).order('created_at', { ascending: true }).limit(4) // تقليل الـ limit لسرعة الصاروخ
+        ]);
 
-        // 2. Customer Check
-        let { data: customer } = await supabase
-            .from('customers')
-            .select('*')
-            .eq('phone', userPhone)
-            .single();
-
-        if (!customer) {
-            await supabase.from('customers').insert([{ phone: userPhone, name: customerName }]);
+        // لو العميل مش موجود، نسجله في الخلفية
+        if (!customerResult.data) {
+            supabase.from('customers').insert([{ phone: userPhone, name: customerName }]).then();
         }
 
-        // 3. Session Check
-        let { data: session } = await supabase
-            .from('conversations_sessions')
-            .select('*')
-            .eq('phone', userPhone)
-            .single();
-
+        let session = sessionResult.data;
         if (!session) {
             const { data: newSession } = await supabase
                 .from('conversations_sessions')
@@ -84,36 +77,21 @@ export default async function handler(req, res) {
         }
 
         if (session && session.mode === 'human') {
-            await supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]);
+            supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]).then();
             return res.status(200).json({ status: 'human_mode_active', reply: null });
         }
 
-        // 4. Save User Message
-        await supabase.from('messages').insert([
-            { phone: userPhone, role: 'user', content: userMessage }
-        ]);
+        // حفظ رسالة المستخدم في الخلفية
+        supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]).then();
 
-        // 5. Fetch History
-        const { data: historyData } = await supabase
-            .from('messages')
-            .select('role, content')
-            .eq('phone', userPhone)
-            .order('created_at', { ascending: true })
-            .limit(10);
-
+        // تجهيز الـ Contents للـ AI بسرعة
         let contents = [];
+        const historyData = historyResult.data;
         if (historyData && historyData.length > 0) {
             contents = historyData.map(msg => ({
                 role: msg.role === 'model' ? 'model' : 'user',
                 parts: [{ text: String(msg.content || '') }]
             }));
-        } else {
-            contents = [
-                {
-                    role: 'user',
-                    parts: [{ text: String(userMessage) }]
-                }
-            ];
         }
 
         const lastMsg = contents[contents.length - 1];
@@ -124,7 +102,7 @@ export default async function handler(req, res) {
             });
         }
 
-        // 6. Call Gemini API
+        // 3. استدعاء Gemini 3.6 Flash
         const response = await ai.models.generateContent({
             model: 'gemini-3.6-flash',
             contents: contents,
@@ -141,21 +119,19 @@ export default async function handler(req, res) {
         
         if (replyText.includes('[HUMAN_HANDOFF]')) {
             replyText = "ولا تقلق يا فندم، أنا هحولك حالاً لأحد زميلي من خدمة العملاء يتابع معاك التفاصيل بدقة. ثواني ويكون معاك!";
-            await supabase
-                .from('conversations_sessions')
-                .update({ mode: 'human' })
-                .eq('phone', userPhone);
+            supabase.from('conversations_sessions').update({ mode: 'human' }).eq('phone', userPhone).then();
         }
 
-        // 7. Save AI Response
-        await supabase.from('messages').insert([
-            { phone: userPhone, role: 'model', content: replyText }
-        ]);
+        // حفظ رد الـ AI في الخلفية
+        supabase.from('messages').insert([{ phone: userPhone, role: 'model', content: replyText }]).then();
+
+        const duration = Date.now() - startTime;
+        console.log(`⚡ Response sent in ${duration}ms`);
 
         return res.status(200).json({ 
             status: 'success', 
             webhook_id: webhookId, 
-            event_handled: eventType,
+            execution_time_ms: duration,
             reply: replyText 
         });
 
