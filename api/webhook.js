@@ -26,7 +26,7 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_empty_message' });
         }
 
-        // 1. فحص الـ Idempotency بسرعة (ضروري يكون سريع)
+        // 1. فحص الـ Idempotency بسرعة
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
             .select('webhook_id')
@@ -37,9 +37,9 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
 
-        // 2. استدعاء جيميناي فوراً (بالموديل السريع والحديث)
+        // 2. استدعاء جيميناي بالموديل الصحيح والمطلوب رسمياً (gemini-3.6-flash)
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.6-flash',
             contents: [{ role: 'user', parts: [{ text: String(userMessage) }] }],
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. 
@@ -50,7 +50,7 @@ export default async function handler(req, res) {
             }
         });
 
-        let replyText = response.text || "أهلاً بك، كيف يمكنني مساعدتك اليوم؟.";
+        let replyText = response.text || "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
         
         let isHumanMode = false;
         if (replyText.includes('[HUMAN_HANDOFF]')) {
@@ -60,7 +60,7 @@ export default async function handler(req, res) {
 
         const totalTime = Date.now() - t0;
 
-        // 3. نرجع الرد فوراً للعميل (أسرع استجابة ممكنة)
+        // 3. إرسال الرد فوراً للعميل بأعلى سرعة (سرعة صاروخية)
         res.status(200).json({ 
             status: 'success', 
             webhook_id: webhookId, 
@@ -68,13 +68,11 @@ export default async function handler(req, res) {
             reply: replyText 
         });
 
-        // 4. كل عمليات Supabase وسجلاتی الحفظ تحصل في الخلفية بهدوء بعد ما العميل استلم رده!
+        // 4. العمليات وسجلات قاعدة البيانات في الخلفية بهدوء ت تام
         (async () => {
             try {
-                // تسجيل الـ Idempotency
                 await supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]);
 
-                // حفظ العميل أو الجلسة أو الرسائل
                 await supabase.from('messages').insert([
                     { phone: userPhone, role: 'user', content: userMessage },
                     { phone: userPhone, role: 'model', content: replyText }
