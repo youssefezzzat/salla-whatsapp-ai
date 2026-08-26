@@ -4,7 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 // الاتصال بـ Supabase باستخدام متغيرات البيئة في Vercel
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-// تهيئة Gemini
+// تهيئة Gemini بالـ SDK الحديث
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export default async function handler(req, res) {
@@ -86,7 +86,7 @@ export default async function handler(req, res) {
 
         let formattedHistory = historyData && historyData.length > 0 
             ? historyData.map(msg => ({
-                role: msg.role,
+                role: msg.role === 'model' ? 'model' : 'user',
                 parts: [{ text: msg.content }]
               }))
             : [];
@@ -98,9 +98,9 @@ export default async function handler(req, res) {
             });
         }
 
-        // 6. تشغيل الـ AI
+        // 6. تشغيل الـ AI باستخدام الموديل المستقر الصحيح
         const response = await ai.models.generateContent({
-            model: 'gemini-3.6-flash',
+            model: 'gemini-2.5-flash',
             contents: formattedHistory,
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني (يعمل على سلة). مهمتك:
