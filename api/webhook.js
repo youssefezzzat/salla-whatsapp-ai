@@ -33,7 +33,9 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_empty_message' });
         }
 
-        const supabaseUrl = process.env.SUPABASE_URL;
+        // تنظيف الـ URL لضمان عدم وجود سلاش زايدة تسبب fetch failed
+        const rawSupabaseUrl = process.env.SUPABASE_URL || '';
+        const supabaseUrl = rawSupabaseUrl.endsWith('/') ? rawSupabaseUrl.slice(0, -1) : rawSupabaseUrl;
         const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 
         const headers = {
@@ -49,7 +51,7 @@ export default async function handler(req, res) {
         });
         const existingLogs = await checkRes.json();
 
-        if (existingLogs && existingLogs.length > 0) {
+        if (existingLogs && Array.isArray(existingLogs) && existingLogs.length > 0) {
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
 
