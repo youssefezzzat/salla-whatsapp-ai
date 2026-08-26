@@ -9,7 +9,7 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const startTime = Date.now();
+    const t0 = Date.now();
 
     try {
         const webhookId = req.headers['webhook-id'] || req.headers['x-webhook-id'] || `wh_${Date.now()}`;
@@ -19,7 +19,10 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_from_me' });
         }
 
-        // 1. Idempotency Check سريع
+        const t1 = Date.now();
+        console.log(`⏱️ Setup time: ${t1 - t0}ms`);
+
+        // فحص الـ Idempotency
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
             .select('webhook_id')
@@ -30,8 +33,8 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
 
-        // تسجيل الـ webhook في الخلفية بدون انتظار تعطيلي كامل
-        supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]).then();
+        const t2 = Date.now();
+        console.log(`⏱️ Idempotency check time: ${t2 - t1}ms`);
 
         let userPhone, userMessage, customerName;
         const eventType = payload.event || 'chat_message';
@@ -42,7 +45,6 @@ export default async function handler(req, res) {
             const orderId = payload.data.id;
             const totalAmount = payload.data.amounts?.total?.amount || 0;
             const currency = payload.data.amounts?.total?.currency || 'SAR';
-
             userMessage = `مرحباً، لقد قمت للتو بإنشاء طلب جديد برقم #${orderId} بقيمة ${totalAmount} ${currency}.`;
         } else {
             userPhone = payload.phone || 'unknown';
@@ -54,17 +56,15 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_empty_message' });
         }
 
-        // 2. سحب البيانات والـ History بشكل متزامن (Parallel) لتقليل وقت الانتظار
+        // سحب البيانات من Supabase
         const [customerResult, sessionResult, historyResult] = await Promise.all([
             supabase.from('customers').select('*').eq('phone', userPhone).single(),
             supabase.from('conversations_sessions').select('*').eq('phone', userPhone).single(),
-            supabase.from('messages').select('role, content').eq('phone', userPhone).order('created_at', { ascending: true }).limit(4) // تقليل الـ limit لسرعة الصاروخ
+            supabase.from('messages').select('role, content').eq('phone', userPhone).order('created_at', { ascending: true }).limit(2)
         ]);
 
-        // لو العميل مش موجود، نسجله في الخلفية
-        if (!customerResult.data) {
-            supabase.from('customers').insert([{ phone: userPhone, name: customerName }]).then();
-        }
+        const t3 = Date.now();
+        console.log(`⏱️ Supabase queries time: ${t3 - t2}ms`);
 
         let session = sessionResult.data;
         if (!session) {
@@ -77,14 +77,9 @@ export default async function handler(req, res) {
         }
 
         if (session && session.mode === 'human') {
-            supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]).then();
             return res.status(200).json({ status: 'human_mode_active', reply: null });
         }
 
-        // حفظ رسالة المستخدم في الخلفية
-        supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]).then();
-
-        // تجهيز الـ Contents للـ AI بسرعة
         let contents = [];
         const historyData = historyResult.data;
         if (historyData && historyData.length > 0) {
@@ -94,44 +89,40 @@ export default async function handler(req, res) {
             }));
         }
 
-        const lastMsg = contents[contents.length - 1];
-        if (!lastMsg || lastMsg.role !== 'user' || lastMsg.parts[0].text !== userMessage) {
-            contents.push({
-                role: 'user',
-                parts: [{ text: String(userMessage) }]
-            });
-        }
+        contents.push({
+            role: 'user',
+            parts: [{ text: String(userMessage) }]
+        });
 
-        // 3. استدعاء Gemini 3.6 Flash
+        // استدعاء Gemini API
+        const aiStart = Date.now();
         const response = await ai.models.generateContent({
             model: 'gemini-3.6-flash',
             contents: contents,
             config: {
-                systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني (يعمل على سلة). مهمتك:
-                - التحدث بلغة عربية (عامية مصرية بسيطة وودودة ومحترفة).
-                - مساعدة العميل في اختيار المنتجات وشرح المميزات والأسعار، وإذا أرسل إشعار بطلب جديد، رحب به وشكره على ثقته في المتجر وأكد له أن طلبه قيد المراجعة.
-                - إذا طلب العميل التحدث مع موظف بشري أو اشتكى بشدة، أجب بـ [HUMAN_HANDOFF] في أول ردك.
-                - كن دقيقاً، صبوراً، وساعد العميل حتى إتمام الشراء.`,
+                systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. تحدث بعامية مصرية بسيطة وودودة ومحترفة لمساعدة العميل.`,
             }
         });
+        const aiEnd = Date.now();
+        console.log(`⏱️ Gemini API time: ${aiEnd - aiStart}ms`);
 
         let replyText = response.text || "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
-        
-        if (replyText.includes('[HUMAN_HANDOFF]')) {
-            replyText = "ولا تقلق يا فندم، أنا هحولك حالاً لأحد زميلي من خدمة العملاء يتابع معاك التفاصيل بدقة. ثواني ويكون معاك!";
-            supabase.from('conversations_sessions').update({ mode: 'human' }).eq('phone', userPhone).then();
-        }
 
-        // حفظ رد الـ AI في الخلفية
-        supabase.from('messages').insert([{ phone: userPhone, role: 'model', content: replyText }]).then();
+        // حفظ الرسائل في الخلفية بدون ما نعطل الرد
+        Promise.all([
+            supabase.from('customers').insert([{ phone: userPhone, name: customerName }]),
+            supabase.from('messages').insert([{ phone: userPhone, role: 'user', content: userMessage }]),
+            supabase.from('messages').insert([{ phone: userPhone, role: 'model', content: replyText }]),
+            supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }])
+        ]).catch(err => console.error("Background sync error:", err));
 
-        const duration = Date.now() - startTime;
-        console.log(`⚡ Response sent in ${duration}ms`);
+        const totalTime = Date.now() - t0;
+        console.log(`⏱️ TOTAL Execution time: ${totalTime}ms`);
 
         return res.status(200).json({ 
             status: 'success', 
             webhook_id: webhookId, 
-            execution_time_ms: duration,
+            total_time_ms: totalTime,
             reply: replyText 
         });
 
