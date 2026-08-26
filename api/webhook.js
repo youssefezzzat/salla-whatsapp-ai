@@ -1,21 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI } from '@google/genai';
 
-// الاتصال بـ Supabase باستخدام متغيرات البيئة في Vercel
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-
-// تهيئة Gemini بالـ SDK الحديث
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export default async function handler(req, res) {
-    // التأكد إن الطلب نوعه POST
     if (req.method !== 'POST') {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
     try {
-        console.log("📥 Received Vercel webhook body:", req.body);
-
         const webhookId = req.headers['webhook-id'] || req.headers['x-webhook-id'] || `wh_${Date.now()}`;
         const payload = req.body;
 
@@ -23,7 +17,7 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_from_me' });
         }
 
-        // 1. فحص الـ Idempotency لمنع التكرار
+        // 1. Idempotency Check
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
             .select('webhook_id')
@@ -39,7 +33,7 @@ export default async function handler(req, res) {
         const userPhone = payload.phone;
         const userMessage = payload.message;
 
-        // 2. التحقق من العميل في جدول customers
+        // 2. Customer Check
         let { data: customer } = await supabase
             .from('customers')
             .select('*')
@@ -50,7 +44,7 @@ export default async function handler(req, res) {
             await supabase.from('customers').insert([{ phone: userPhone, name: payload.name || 'عميل جديد' }]);
         }
 
-        // 3. التحقق من حالة المحادثة (Human Handoff Check)
+        // 3. Session Check
         let { data: session } = await supabase
             .from('conversations_sessions')
             .select('*')
@@ -71,12 +65,12 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'human_mode_active', reply: null });
         }
 
-        // 4. حفظ رسالة المستخدم
+        // 4. Save User Message
         await supabase.from('messages').insert([
             { phone: userPhone, role: 'user', content: userMessage }
         ]);
 
-        // 5. سحب التاريخ للذاكرة
+        // 5. Fetch History and Format cleanly for SDK
         const { data: historyData } = await supabase
             .from('messages')
             .select('role, content')
@@ -84,24 +78,35 @@ export default async function handler(req, res) {
             .order('created_at', { ascending: true })
             .limit(10);
 
-        let formattedHistory = historyData && historyData.length > 0 
-            ? historyData.map(msg => ({
+        // تحويل الأدوار بالشكل الصحيح المقبول في Gemini SDK (user / model)
+        let contents = [];
+        if (historyData && historyData.length > 0) {
+            contents = historyData.map(msg => ({
                 role: msg.role === 'model' ? 'model' : 'user',
-                parts: [{ text: msg.content }]
-              }))
-            : [];
+                parts: [{ text: String(msg.content || '') }]
+            }));
+        } else {
+            contents = [
+                {
+                    role: 'user',
+                    parts: [{ text: String(userMessage) }]
+                }
+            ];
+        }
 
-        if (formattedHistory.length === 0 || formattedHistory[formattedHistory.length - 1].parts[0].text !== userMessage) {
-            formattedHistory.push({
+        // التأكد إن آخر رسالة هي رسالة المستخدم الحالية
+        const lastMsg = contents[contents.length - 1];
+        if (!lastMsg || lastMsg.role !== 'user' || lastMsg.parts[0].text !== userMessage) {
+            contents.push({
                 role: 'user',
-                parts: [{ text: userMessage }]
+                parts: [{ text: String(userMessage) }]
             });
         }
 
-        // 6. تشغيل الـ AI باستخدام الموديل المستقر الصحيح
+        // 6. Call Gemini API securely
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
-            contents: formattedHistory,
+            contents: contents,
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني (يعمل على سلة). مهمتك:
                 - التحدث بلغة عربية (عامية مصرية بسيطة وودودة ومحترفة).
@@ -111,7 +116,7 @@ export default async function handler(req, res) {
             }
         });
 
-        let replyText = response.text;
+        let replyText = response.text || "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
         
         if (replyText.includes('[HUMAN_HANDOFF]')) {
             replyText = "ولا تقلق يا فندم، أنا هحولك حالاً لأحد زميلي من خدمة العملاء يتابع معاك التفاصيل بدقة. ثواني ويكون معاك!";
@@ -121,7 +126,7 @@ export default async function handler(req, res) {
                 .eq('phone', userPhone);
         }
 
-        // 7. حفظ رد الـ AI
+        // 7. Save AI Response
         await supabase.from('messages').insert([
             { phone: userPhone, role: 'model', content: replyText }
         ]);
@@ -133,7 +138,7 @@ export default async function handler(req, res) {
         });
 
     } catch (error) {
-        console.error("Error processing Vercel webhook:", error.message);
-        return res.status(500).json({ error: error.message });
+        console.error("Error processing Vercel webhook:", error);
+        return res.status(500).json({ error: error.message || error });
     }
 }
