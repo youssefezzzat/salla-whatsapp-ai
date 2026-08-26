@@ -1,0 +1,17 @@
+{
+  "name": "webhook-ai-handler",
+  "version": "1.0.0",
+  "description": "Enterprise AI WhatsApp & Salla Webhook Handler",
+  "main": "api/webhook.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^0.1.1",
+    "@supabase/supabase-js": "^2.39.0"
+  }
+}
