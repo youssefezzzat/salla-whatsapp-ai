@@ -1,6 +1,15 @@
 {
-  "rewrites": [
-    { "source": "/api/webhook", "destination": "/api/webhook.js" },
-    { "source": "/(.*)", "destination": "/api/webhook.js" }
+  "version": 2,
+  "builds": [
+    {
+      "src": "app.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.js"
+    }
   ]
 }
