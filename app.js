@@ -21,7 +21,7 @@ app.get('/', (req, res) => {
     return res.send('🚀 Enterprise AI Sales & Support Server is running!');
 });
 
-// 1. WhatsApp Webhook Verification (مهم جداً عشان ميتا تقبل الرابط)
+// 1. WhatsApp Webhook Verification (معدل ومحسن للعمل بسلاسة مع Vercel)
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'my_secure_verify_token';
     
@@ -29,15 +29,18 @@ app.get('/webhook', (req, res) => {
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
 
+    console.log("🔍 Verification Request Received:", { mode, token, challenge });
+
     if (mode && token) {
         if (mode === 'subscribe' && token === VERIFY_TOKEN) {
             console.log('✅ WEBHOOK_VERIFIED_SUCCESSFULLY');
-            return res.status(200).send(challenge); // ميتا تشترط إرجاع الـ challenge كـ Text خالص
+            return res.status(200).send(challenge); // إرسال الـ challenge مباشرة كـ Text لميتا
         } else {
-            return res.sendStatus(403);
+            console.log('❌ Verify token mismatch!');
+            return res.status(403).send('Verification failed: Token mismatch');
         }
     }
-    return res.sendStatus(400);
+    return res.status(400).send('Bad Request: Missing parameters');
 });
 
 // 2. استقبال رسائل الواتساب وتوليد الرد بالذكاء الاصطناعي
@@ -98,7 +101,7 @@ app.post('/webhook', async (req, res) => {
 
         // استدعاء Gemini الذكي بالعامية المصرية
         const response = await ai.models.generateContent({
-            model: 'gemini-3.6-flash',
+            model: 'gemini-2.5-flash',
             contents: contents,
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. 
@@ -112,7 +115,6 @@ app.post('/webhook', async (req, res) => {
         let replyText = response.text || "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
         let isHumanMode = false;
 
-        // التحقق من طلب التحويل البشري
         if (replyText.includes('[HUMAN_HANDOFF]')) {
             replyText = "ولا تقلق يا فندم، أنا هحولك حالاً لأحد زميلي من خدمة العملاء يتابع معاك التفاصيل بدقة. ثواني ويكون معاك!";
             isHumanMode = true;
@@ -128,7 +130,7 @@ app.post('/webhook', async (req, res) => {
             reply: replyText 
         });
 
-        // حفظ العمليات وتحديث قاعدة البيانات في الخلفية (Background Tasks)
+        // Background Tasks للحفظ وتحديث قاعدة البيانات بدون تداخل
         (async () => {
             try {
                 await supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]);
