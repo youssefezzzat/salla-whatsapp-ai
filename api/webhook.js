@@ -27,7 +27,7 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_missing_data' });
         }
 
-        // 1. فحص الـ Idempotency بناءً على الـ Schema الصحيحة
+        // 1. فحص الـ Idempotency
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
             .select('event_id')
@@ -46,7 +46,7 @@ export default async function handler(req, res) {
             .single();
 
         if (!customer) {
-            const { data: newCustomer, err: custError } = await supabase
+            const { data: newCustomer } = await supabase
                 .from('customers')
                 .insert([{ phone: userPhone, name: customerName }])
                 .select('id')
@@ -57,7 +57,7 @@ export default async function handler(req, res) {
 
         const customerId = customer ? customer.id : null;
 
-        // 3. سحب آخر رسايل للمحادثة (History) لكي يفهم جيميناي السياق
+        // 3. سحب آخر رسايل للمحادثة (History)
         const { data: historyData } = await supabase
             .from('messages')
             .select('role, content')
@@ -78,9 +78,9 @@ export default async function handler(req, res) {
             parts: [{ text: String(userMessage) }]
         });
 
-        // 4. استدعاء جيميناي (تأكدنا من استخدام موديل متوفر وفعال مثل gemini-2.5-flash)
+        // 4. استدعاء جيميناي باستخدام الموديل المستقر gemini-1.5-flash
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-1.5-flash',
             contents: contents,
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. 
@@ -101,7 +101,7 @@ export default async function handler(req, res) {
 
         const totalTime = Date.now() - t0;
 
-        // 5. إرسال الرد فوراً للعميل لمنع أي Timeout على Vercel
+        // 5. إرسال الرد فوراً للعميل
         res.status(200).json({ 
             status: 'success', 
             webhook_id: webhookId, 
@@ -112,7 +112,6 @@ export default async function handler(req, res) {
         // 6. العمليات في الخلفية (Background Tasks) لتخزين السجلات
         (async () => {
             try {
-                // تسجيل الـ Idempotency مع الـ expires_at (ساعة من الآن)
                 const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
                 await supabase.from('idempotency_logs').insert([{ 
                     event_id: webhookId, 
@@ -120,7 +119,6 @@ export default async function handler(req, res) {
                 }]);
 
                 if (customerId) {
-                    // التحقق من الجلسة أو إنشائها
                     const { data: session } = await supabase
                         .from('conversations_sessions')
                         .select('id')
@@ -135,7 +133,6 @@ export default async function handler(req, res) {
                         }]);
                     }
 
-                    // حفظ الرسائل في جدول الـ messages (تأكد من إنشاء جدول messages لو مش موجود في السكيما)
                     await supabase.from('messages').insert([
                         { phone: userPhone, role: 'user', content: userMessage },
                         { phone: userPhone, role: 'model', content: replyText }
