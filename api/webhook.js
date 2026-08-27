@@ -27,18 +27,37 @@ export default async function handler(req, res) {
             return res.status(200).json({ status: 'skipped_missing_data' });
         }
 
-        // 1. فحص الـ Idempotency بسرعة فائقة
+        // 1. فحص الـ Idempotency بناءً على الـ Schema الصحيحة
         const { data: existingLog } = await supabase
             .from('idempotency_logs')
-            .select('webhook_id')
-            .eq('webhook_id', webhookId)
+            .select('event_id')
+            .eq('event_id', webhookId)
             .single();
 
         if (existingLog) {
             return res.status(200).json({ status: 'duplicate_ignored' });
         }
 
-        // 2. سحب آخر رسايل للمحادثة (History) عشان جيميناي يكون فاهم السياق
+        // 2. جلب أو إنشاء العميل أولاً لضمان وجود customer_id للربط
+        let { data: customer } = await supabase
+            .from('customers')
+            .select('id')
+            .eq('phone', userPhone)
+            .single();
+
+        if (!customer) {
+            const { data: newCustomer, err: custError } = await supabase
+                .from('customers')
+                .insert([{ phone: userPhone, name: customerName }])
+                .select('id')
+                .single();
+            
+            if (newCustomer) customer = newCustomer;
+        }
+
+        const customerId = customer ? customer.id : null;
+
+        // 3. سحب آخر رسايل للمحادثة (History) لكي يفهم جيميناي السياق
         const { data: historyData } = await supabase
             .from('messages')
             .select('role, content')
@@ -54,15 +73,14 @@ export default async function handler(req, res) {
             }));
         }
         
-        // إضافة الرسالة الحالية للـ Contents
         contents.push({
             role: 'user',
             parts: [{ text: String(userMessage) }]
         });
 
-        // 3. استدعاء جيميناي بالموديل المطلوب وبسياق المحادثة الكامل
+        // 4. استدعاء جيميناي (تأكدنا من استخدام موديل متوفر وفعال مثل gemini-2.5-flash)
         const response = await ai.models.generateContent({
-            model: 'gemini-3.6-flash',
+            model: 'gemini-2.5-flash',
             contents: contents,
             config: {
                 systemInstruction: `أنت موظف مبيعات وخدمة عملاء احترافي لمتجر إلكتروني. 
@@ -74,8 +92,8 @@ export default async function handler(req, res) {
         });
 
         let replyText = response.text || "أهلاً بك، كيف يمكنني مساعدتك اليوم؟";
-        
         let isHumanMode = false;
+        
         if (replyText.includes('[HUMAN_HANDOFF]')) {
             replyText = "ولا تقلق يا فندم، أنا هحولك حالاً لأحد زميلي من خدمة العملاء يتابع معاك التفاصيل بدقة. ثواني ويكون معاك!";
             isHumanMode = true;
@@ -83,7 +101,7 @@ export default async function handler(req, res) {
 
         const totalTime = Date.now() - t0;
 
-        // 4. إرسال الرد فوراً للعميل
+        // 5. إرسال الرد فوراً للعميل لمنع أي Timeout على Vercel
         res.status(200).json({ 
             status: 'success', 
             webhook_id: webhookId, 
@@ -91,36 +109,44 @@ export default async function handler(req, res) {
             reply: replyText 
         });
 
-        // 5. العمليات وقاعدة البيانات في الخلفية (Background Tasks) لضمان عدم حدوث أي تأخير
+        // 6. العمليات في الخلفية (Background Tasks) لتخزين السجلات
         (async () => {
             try {
-                // تسجيل الـ Idempotency
-                await supabase.from('idempotency_logs').insert([{ webhook_id: webhookId }]);
+                // تسجيل الـ Idempotency مع الـ expires_at (ساعة من الآن)
+                const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+                await supabase.from('idempotency_logs').insert([{ 
+                    event_id: webhookId, 
+                    expires_at: expiresAt 
+                }]);
 
-                // التأكد من وجود العميل وجلسته أو إنشائهم
-                await supabase.from('customers').upsert([{ phone: userPhone, name: customerName }], { onConflict: 'phone' });
-                
-                const { data: session } = await supabase
-                    .from('conversations_sessions')
-                    .select('phone')
-                    .eq('phone', userPhone)
-                    .single();
-
-                if (!session) {
-                    await supabase.from('conversations_sessions').insert([{ phone: userPhone, mode: 'ai', department: 'sales' }]);
-                }
-
-                // حفظ الرسايل في جدول الـ messages
-                await supabase.from('messages').insert([
-                    { phone: userPhone, role: 'user', content: userMessage },
-                    { phone: userPhone, role: 'model', content: replyText }
-                ]);
-
-                if (isHumanMode) {
-                    await supabase
+                if (customerId) {
+                    // التحقق من الجلسة أو إنشائها
+                    const { data: session } = await supabase
                         .from('conversations_sessions')
-                        .update({ mode: 'human' })
-                        .eq('phone', userPhone);
+                        .select('id')
+                        .eq('customer_id', customerId)
+                        .single();
+
+                    if (!session) {
+                        await supabase.from('conversations_sessions').insert([{ 
+                            customer_id: customerId, 
+                            status: 'ai', 
+                            department: 'sales' 
+                        }]);
+                    }
+
+                    // حفظ الرسائل في جدول الـ messages (تأكد من إنشاء جدول messages لو مش موجود في السكيما)
+                    await supabase.from('messages').insert([
+                        { phone: userPhone, role: 'user', content: userMessage },
+                        { phone: userPhone, role: 'model', content: replyText }
+                    ]);
+
+                    if (isHumanMode) {
+                        await supabase
+                            .from('conversations_sessions')
+                            .update({ status: 'human', department: 'human' })
+                            .eq('customer_id', customerId);
+                    }
                 }
             } catch (bgError) {
                 console.error("Background DB Error:", bgError);
